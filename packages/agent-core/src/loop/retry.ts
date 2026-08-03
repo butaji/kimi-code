@@ -62,6 +62,31 @@ export async function chatWithRetry(input: ChatWithRetryInput): Promise<LLMChatR
       return response;
     } catch (error) {
       captureAttemptTraceId(input, error);
+      // Aliyuncs Model Studio / MaaS quota recovery: on a 429, sleep 60
+      // seconds and retry the same request forever (until the quota
+      // window resets or the user aborts). Bypasses the standard
+      // maxAttempts budget — the Aliyuncs quota window resets on roughly
+      // a per-minute boundary and a permanent failure from a transient
+      // quota exhaustion would just block the session. Any non-429 error
+      // falls through to the regular retry budget.
+      const statusError = findAPIStatusError(error);
+      if (statusError?.statusCode === 429) {
+        const delayMs = 60_000;
+        input.params.signal.throwIfAborted();
+        input.dispatchEvent({
+          type: 'step.retrying',
+          turnId: input.turnId,
+          step: input.currentStep,
+          stepUuid: input.stepUuid,
+          failedAttempt: attempt,
+          nextAttempt: attempt + 1,
+          maxAttempts,
+          delayMs,
+          ...retryErrorFields(error),
+        });
+        await sleepForRetry(delayMs, input.params.signal);
+        continue;
+      }
       if (attempt >= maxAttempts || !input.llm.isRetryableError(error)) {
         logRequestFailure(input, error, attempt, maxAttempts);
         throw error;
