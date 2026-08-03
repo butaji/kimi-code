@@ -502,6 +502,28 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
           projection = 'strict';
           continue;
         }
+        // Aliyuncs Model Studio / MaaS quota recovery: only fires on the
+        // documented Aliyuncs endpoints. On a 429, sleep 60 seconds and
+        // retry the same request forever (until the quota window resets
+        // or the user aborts). Other providers fall through to `throw
+        // error` and fail the turn fast.
+        if (
+          isAliyuncsQuotaRetryBaseUrl(request.model.baseUrl) &&
+          apiStatusCode(raw) === 429
+        ) {
+          signal?.throwIfAborted();
+          this.log.warn(
+            'aliyuncs quota exhausted (429); waiting 60s and retrying',
+            {
+              model: request.model.name,
+              baseUrl: request.model.baseUrl,
+              ...request.logFields,
+              ...retryErrorFields(raw),
+            },
+          );
+          await sleepWithAbort(60_000, signal);
+          continue;
+        }
         throw error;
       }
     }
@@ -832,6 +854,53 @@ function apiTraceId(error: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * The two Aliyuncs Model Studio / MaaS base URLs. The OpenAI-compatible
+ * (`/compatible-mode/v1`) and the Anthropic-compatible (`/apps/anthropic`)
+ * endpoints share the same host; a host match alone gates the quota
+ * recovery.
+ */
+const ALIYUNCS_MAAS_HOST = 'token-plan.ap-southeast-1.maas.aliyuncs.com';
+
+/**
+ * Whether `baseUrl` belongs to the Aliyuncs Model Studio / MaaS endpoint
+ * (the OpenAI- and Anthropic-compatible paths served from the same
+ * host). Match on the URL host so both `https://…/compatible-mode/v1` and
+ * `https://…/apps/anthropic` qualify.
+ */
+function isAliyuncsQuotaRetryBaseUrl(baseUrl: string | undefined): boolean {
+  if (baseUrl === undefined) return false;
+  try {
+    return new URL(baseUrl).host === ALIYUNCS_MAAS_HOST;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Sleep for `delayMs`, aborting early if `signal` fires. Used by the
+ * Aliyuncs quota-recovery wait between retry attempts; the loop's
+ * existing `signal.throwIfAborted()` calls already gate entry, so this
+ * just needs to honor an in-progress abort while waiting.
+ */
+function sleepWithAbort(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted === true) {
+      reject(signal.reason ?? new Error('Aborted'));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new Error('Aborted'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 registerScopedService(
