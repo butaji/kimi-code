@@ -214,14 +214,15 @@ describe('chatWithRetry: default retry budget', () => {
   });
 });
 
-describe('chatWithRetry: quota-exhausted 429 fails fast', () => {
-  it('does not retry a quota-exhausted 429 even when it carries retry-after', async () => {
-    // Same status as a rate limit, but exhausted quota/balance never clears
-    // on its own — the error must surface after a single attempt instead of
-    // burning the whole default budget. The 1ms retry-after proves a server
-    // backoff hint does not re-enable retries either.
+describe('chatWithRetry: quota-exhausted 429 retries indefinitely', () => {
+  it('retries a quota-exhausted 429 with the 60s infinite-retry path', async () => {
+    // All 429s — including APIProviderQuotaExhaustedError — retry
+    // indefinitely on the 429 path. Gateways like Aliyuncs MaaS return
+    // `insufficient_quota` (OpenAI's permanent-quota code) for a per-window
+    // quota limit that actually resets, so the class-level distinction
+    // is unreliable. The 1ms retry-after keeps the test fast.
     let calls = 0;
-    const captured: Array<{ type: string }> = [];
+    const captured: Array<{ type: string; delayMs?: number }> = [];
     const llm: LLM = {
       systemPrompt: '',
       modelName: 'mock',
@@ -235,19 +236,24 @@ describe('chatWithRetry: quota-exhausted 429 fails fast', () => {
         );
       },
     };
-    const input = makeInput(llm, new AbortController().signal);
+    const controller = new AbortController();
+    const input = makeInput(llm, controller.signal);
 
-    await expect(
-      chatWithRetry({
-        ...input,
-        dispatchEvent: async (event) => {
-          captured.push(event as { type: string });
-        },
-      }),
-    ).rejects.toMatchObject({ name: 'APIProviderQuotaExhaustedError' });
+    // Abort after 3 calls so the test terminates
+    const promise = chatWithRetry({
+      ...input,
+      dispatchEvent: async (event) => {
+        captured.push(event as { type: string; delayMs?: number });
+        if (calls >= 3) controller.abort();
+      },
+    });
 
-    expect(calls).toBe(1);
-    expect(captured.filter((e) => e.type === 'step.retrying')).toHaveLength(0);
+    await expect(promise).rejects.toThrow();
+
+    expect(calls).toBeGreaterThanOrEqual(3);
+    const retrying = captured.filter((e) => e.type === 'step.retrying');
+    expect(retrying.length).toBeGreaterThanOrEqual(2);
+    expect(retrying[0]?.delayMs).toBe(1); // honors retryAfterMs
   });
 });
 

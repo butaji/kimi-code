@@ -1,6 +1,6 @@
 import { sleep } from '@antfu/utils';
 
-import { APIProviderQuotaExhaustedError, APIStatusError } from '@moonshot-ai/kosong';
+import { APIStatusError } from '@moonshot-ai/kosong';
 import type { Logger } from '#/logging/types';
 
 import { abortable } from '../utils/abort';
@@ -62,28 +62,28 @@ export async function chatWithRetry(input: ChatWithRetryInput): Promise<LLMChatR
       return response;
     } catch (error) {
       captureAttemptTraceId(input, error);
-      // 429 recovery: on a 429, sleep 60 seconds and retry the same
-      // request forever (until the quota window resets or the user
-      // aborts). Bypasses the standard maxAttempts budget — the quota
-      // window resets on roughly a per-minute boundary and a permanent
-      // failure from a transient quota exhaustion would just block the
-      // session. Any non-429 error falls through to the regular retry
-      // budget.
+      // 429 recovery: on a 429, sleep and retry the same request forever
+      // (until the quota window resets or the user aborts). Bypasses the
+      // standard maxAttempts budget — the quota window resets on roughly
+      // a per-minute boundary and a permanent failure from a transient
+      // quota exhaustion would just block the session. Any non-429 error
+      // falls through to the regular retry budget.
       //
-      // Quota-exhausted 429s (`APIProviderQuotaExhaustedError`) are
-      // excluded — they are deterministic (the account must be recharged)
-      // and retrying cannot help, so they fail fast after one attempt.
+      // All 429s are retried, including APIProviderQuotaExhaustedError:
+      // gateways like Aliyuncs MaaS return `insufficient_quota` (OpenAI's
+      // permanent-quota code) for a per-window quota limit that actually
+      // resets, so the class-level distinction is unreliable. The v2 engine
+      // gates this on the Aliyuncs base URL; v1 (this path) applies to all
+      // providers since it cannot inspect the base URL.
       //
       // The standard path (`findAPIStatusError`) covers typed
-      // `APIStatusError` instances. Some gateways (e.g. Aliyuncs MaaS)
-      // forward the 429 only as a text message when the SDK does not
-      // surface it as a structured error — the `is429LikeError` fallback
-      // catches those via the `statusCode`/`status` property or the
-      // leading "429" in the message text.
+      // `APIStatusError` instances. Some gateways forward the 429 only as
+      // a text message when the SDK does not surface it as a structured
+      // error — the `is429LikeError` fallback catches those via the
+      // `statusCode`/`status` property or the "429" in the message text.
       const statusError = findAPIStatusError(error);
       if (
-        (statusError?.statusCode === 429 &&
-          !(statusError instanceof APIProviderQuotaExhaustedError)) ||
+        statusError?.statusCode === 429 ||
         (statusError === undefined && is429LikeError(error))
       ) {
         const delayMs = readRetryAfterMs(error) ?? 60_000;
