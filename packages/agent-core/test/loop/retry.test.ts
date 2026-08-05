@@ -2,6 +2,7 @@ import {
   APIConnectionError,
   APIProviderQuotaExhaustedError,
   APIProviderRateLimitError,
+  APIStatusError,
   emptyUsage,
   isRetryableGenerateError,
 } from '@moonshot-ai/kosong';
@@ -180,8 +181,10 @@ describe('retryBackoffDelays', () => {
 
 describe('chatWithRetry: default retry budget', () => {
   it('retries up to DEFAULT_MAX_RETRY_ATTEMPTS before giving up', async () => {
-    // A sustained 429 carries a 1ms server retry-after so the test exercises
-    // the full default budget without sleeping through the real backoff.
+    // A sustained 500 (server error) is retryable but NOT a 429 — the 429
+    // path retries indefinitely, so a 500 is used here to exercise the
+    // standard bounded retry budget. A 1ms server retry-after keeps the
+    // test fast without sleeping through the real backoff.
     let calls = 0;
     const captured: Array<{ type: string }> = [];
     const llm: LLM = {
@@ -190,7 +193,7 @@ describe('chatWithRetry: default retry budget', () => {
       isRetryableError: (e) => isRetryableGenerateError(e),
       async chat(): Promise<LLMChatResponse> {
         calls += 1;
-        throw new APIProviderRateLimitError('rate limited', null, 1);
+        throw new APIStatusError(500, 'internal server error', null, 1);
       },
     };
     const input = makeInput(llm, new AbortController().signal);
@@ -202,7 +205,7 @@ describe('chatWithRetry: default retry budget', () => {
           captured.push(event as { type: string });
         },
       }),
-    ).rejects.toMatchObject({ name: 'APIProviderRateLimitError' });
+    ).rejects.toMatchObject({ name: 'APIStatusError' });
 
     expect(calls).toBe(DEFAULT_MAX_RETRY_ATTEMPTS);
     expect(captured.filter((e) => e.type === 'step.retrying')).toHaveLength(

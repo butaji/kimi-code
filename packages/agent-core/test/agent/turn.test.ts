@@ -2470,7 +2470,7 @@ describe('Agent turn flow', () => {
     let calls = 0;
     const generate: GenerateFn = async () => {
       calls += 1;
-      throw new APIStatusError(429, 'rate limited', `req-${String(calls)}`, null, `trace-fail-${String(calls)}`);
+      throw new APIStatusError(500, 'internal server error', `req-${String(calls)}`, null, `trace-fail-${String(calls)}`);
     };
     const ctx = testAgent({
       generate,
@@ -2498,7 +2498,7 @@ describe('Agent turn flow', () => {
     const generate: GenerateFn = async () => {
       calls += 1;
       if (calls === 1) {
-        throw new APIStatusError(429, 'rate limited', 'req-1', null, 'trace-fail-1');
+        throw new APIStatusError(500, 'internal server error', 'req-1', null, 'trace-fail-1');
       }
       throw new APIConnectionError('socket hang up');
     };

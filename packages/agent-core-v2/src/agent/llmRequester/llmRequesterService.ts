@@ -97,7 +97,7 @@ import {
 } from './llmRequestOps';
 import { isAbortError } from '#/_base/utils/abort';
 import { ErrorCodes, Error2, unwrapErrorCause } from '#/errors';
-import { retryErrorFields } from '#/_base/utils/retry';
+import { readRetryAfterMs, retryErrorFields } from '#/_base/utils/retry';
 
 const EMPTY_TOOL_PARAMETERS: Record<string, unknown> = {
   type: 'object',
@@ -509,19 +509,21 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         // error` and fail the turn fast.
         if (
           isAliyuncsQuotaRetryBaseUrl(request.model.baseUrl) &&
-          apiStatusCode(raw) === 429
+          is429LikeError(raw)
         ) {
+          const delayMs = readRetryAfterMs(raw) ?? 60_000;
           signal?.throwIfAborted();
           this.log.warn(
-            'aliyuncs quota exhausted (429); waiting 60s and retrying',
+            'aliyuncs quota exhausted (429); waiting before retrying',
             {
               model: request.model.name,
               baseUrl: request.model.baseUrl,
+              delayMs,
               ...request.logFields,
               ...retryErrorFields(raw),
             },
           );
-          await sleepWithAbort(60_000, signal);
+          await sleepWithAbort(delayMs, signal);
           continue;
         }
         throw error;
@@ -841,6 +843,29 @@ function apiStatusCode(error: unknown): number | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * Detect a 429 error through multiple fallbacks. The standard path
+ * (`apiStatusCode`) covers typed `APIStatusError` instances and errors
+ * carrying a `statusCode`/`status` property. Two additional fallbacks cover
+ * gateways (e.g. Aliyuncs MaaS) that forward the 429 only as a text message
+ * when the SDK does not surface it as a structured `APIStatusError`:
+ *
+ * 1. `Error2.code === 'provider.rate_limit'` — the wire code is always a 429.
+ * 2. The error message contains the standalone number "429" — HTTP status
+ *    codes embedded in text are unambiguous.
+ *
+ * This check is only consulted when the caller has already gated on the
+ * Aliyuncs base URL, so false positives are scoped to that provider.
+ */
+function is429LikeError(raw: unknown): boolean {
+  if (apiStatusCode(raw) === 429) return true;
+  if (raw instanceof Error2 && raw.code === ErrorCodes.PROVIDER_RATE_LIMIT) {
+    return true;
+  }
+  if (raw instanceof Error && /\b429\b/.test(raw.message)) return true;
+  return false;
 }
 
 function apiTraceId(error: unknown): string | undefined {
