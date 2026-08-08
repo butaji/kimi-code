@@ -1773,16 +1773,9 @@ describe('goal pause classification on provider errors', () => {
     return goals.getGoal().goal;
   }
 
-  it('pauses the goal on provider rate limits', async () => {
-    const goal = await goalAfterFailedTurn(async () => {
-      throw new APIStatusError(429, 'Rate limited', 'req-429');
-    });
-
-    expect(goal).toMatchObject({
-      status: 'paused',
-      terminalReason: 'Paused after provider rate limit',
-    });
-  });
+  // A 429 never reaches goal pause classification: the stepRetry plugin
+  // retries rate-limited steps indefinitely (60-second wait) inside the turn,
+  // so the turn itself cannot fail on a provider rate limit.
 
   it('pauses the goal on provider connection errors', async () => {
     const goal = await goalAfterFailedTurn(async () => {

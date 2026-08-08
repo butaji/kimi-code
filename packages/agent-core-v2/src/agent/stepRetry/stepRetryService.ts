@@ -5,6 +5,10 @@
  * 5xx, connection, timeout, empty response — `isRetryableGenerateError`) from
  * the loop's error-handler registry and re-enqueues the failed step's driver
  * at the head of the queue after exponential backoff (`retryBackoffDelays`).
+ * HTTP 429 failures (rate limit AND quota-exhausted, including token-plan
+ * providers whose quota refills on a schedule) are claimed unconditionally and
+ * retried forever at a fixed 60-second wait — a transient 429 must never fail
+ * a turn. A server `Retry-After` directive always overrides the local delay.
  * The loop only learns that the error was caught; the retry rides the normal
  * step numbering and consumes `maxSteps` budget like any other step. Each
  * claimed failure publishes `turn.step.retrying`. Consecutive attempts are
@@ -20,6 +24,7 @@ import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/
 import { defineState } from '#/_base/state/stateRegistry';
 import {
   DEFAULT_MAX_RETRY_ATTEMPTS,
+  readErrorStatusCode,
   readRetryAfterMs,
   retryBackoffDelays,
   retryErrorFields,
@@ -67,6 +72,8 @@ export const stepRetryFailedAttemptsKey = defineState<number>(
   () => 0,
 );
 
+export const RATE_LIMITED_STEP_RETRY_DELAY_MS = 60_000;
+
 export class AgentStepRetryService extends Disposable implements IAgentStepRetryService {
   declare readonly _serviceBrand: undefined;
 
@@ -82,7 +89,10 @@ export class AgentStepRetryService extends Disposable implements IAgentStepRetry
     this._register(
       this.loopService.registerLoopErrorHandler({
         id: 'step-retry',
-        match: (context) => isRetryableGenerateError(unwrapErrorCause(context.error)),
+        match: (context) => {
+          const error = unwrapErrorCause(context.error);
+          return isRetryableGenerateError(error) || readErrorStatusCode(error) === 429;
+        },
         handle: (context) => this.recover(context),
       }),
     );
@@ -126,19 +136,24 @@ export class AgentStepRetryService extends Disposable implements IAgentStepRetry
     }
     this.failedAttempts += 1;
 
+    const error = unwrapErrorCause(context.error);
+    const isRateLimited = readErrorStatusCode(error) === 429;
+
     const maxAttempts = Math.max(
       this.config.get<LoopControl>(LOOP_CONTROL_SECTION)?.maxAttemptsPerStep ??
         DEFAULT_MAX_RETRY_ATTEMPTS,
       1,
     );
-    if (this.failedAttempts >= maxAttempts) {
+    if (!isRateLimited && this.failedAttempts >= maxAttempts) {
       this.resetAttempts();
       return false;
     }
 
-    const error = unwrapErrorCause(context.error);
     const delayMs =
-      readRetryAfterMs(error) ?? retryBackoffDelays(maxAttempts)[this.failedAttempts - 1] ?? 0;
+      readRetryAfterMs(error) ??
+      (isRateLimited
+        ? RATE_LIMITED_STEP_RETRY_DELAY_MS
+        : (retryBackoffDelays(maxAttempts)[this.failedAttempts - 1] ?? 0));
     this.eventBus.publish({
       type: 'turn.step.retrying',
       turnId: context.turnId,

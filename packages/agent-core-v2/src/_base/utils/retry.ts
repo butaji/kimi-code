@@ -50,7 +50,7 @@ export function retryErrorFields(error: unknown): RetryErrorFields {
   return {
     errorName: error instanceof Error ? error.name : typeof error,
     errorMessage: error instanceof Error ? error.message : String(error),
-    statusCode: maybeStatusCode(error),
+    statusCode: readErrorStatusCode(error),
   };
 }
 
@@ -60,7 +60,7 @@ function sleep(delayMs: number): Promise<void> {
   });
 }
 
-function maybeStatusCode(error: unknown): number | undefined {
+export function readErrorStatusCode(error: unknown): number | undefined {
   if (typeof error !== 'object' || error === null) return undefined;
   const statusCode = (error as { statusCode?: unknown }).statusCode;
   if (typeof statusCode === 'number') return statusCode;

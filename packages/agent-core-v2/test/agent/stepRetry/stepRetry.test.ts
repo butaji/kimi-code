@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   APIConnectionError,
+  APIProviderQuotaExhaustedError,
   APIProviderRateLimitError,
   APIStatusError,
 } from '#/kosong/contract/errors';
@@ -119,7 +120,7 @@ describe('stepRetry plugin', () => {
     ctx = createTestAgent(
       llmGenerateServices(async () => {
         calls += 1;
-        throw new APIStatusError(429, 'slow down');
+        throw new APIStatusError(500, 'server error');
       }),
     );
 
@@ -131,6 +132,72 @@ describe('stepRetry plugin', () => {
     expect(rpcEvents('turn.step.interrupted')).toEqual([
       expect.objectContaining({
         args: expect.objectContaining({ reason: 'error', step: 10 }),
+      }),
+    ]);
+  });
+
+  it('retries a 429 forever at a fixed 60-second wait', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    ctx = createTestAgent(
+      llmGenerateServices(async () => {
+        calls += 1;
+        if (calls <= 12) throw new APIStatusError(429, 'slow down');
+        return {
+          id: 'rate-limit-response',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'recovered' }],
+            toolCalls: [],
+          },
+          usage: emptyUsage(),
+          finishReason: 'completed',
+          rawFinishReason: 'stop',
+        };
+      }),
+    );
+
+    const result = await runTurn(1);
+
+    expect(result).toEqual({ type: 'completed', steps: 13, truncated: false });
+    expect(calls).toBe(13);
+    expect(rpcEvents('turn.step.retrying')).toHaveLength(12);
+    for (const event of rpcEvents('turn.step.retrying')) {
+      expect(event.args).toEqual(expect.objectContaining({ delayMs: 60_000 }));
+    }
+  });
+
+  it('retries a quota-exhausted 429 instead of failing fast', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    ctx = createTestAgent(
+      llmGenerateServices(async () => {
+        calls += 1;
+        if (calls === 1) throw new APIProviderQuotaExhaustedError('quota exceeded');
+        return {
+          id: 'quota-response',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'recovered' }],
+            toolCalls: [],
+          },
+          usage: emptyUsage(),
+          finishReason: 'completed',
+          rawFinishReason: 'stop',
+        };
+      }),
+    );
+
+    const result = await runTurn(1);
+
+    expect(result).toEqual({ type: 'completed', steps: 2, truncated: false });
+    expect(calls).toBe(2);
+    expect(rpcEvents('turn.step.retrying')).toEqual([
+      expect.objectContaining({
+        args: expect.objectContaining({
+          delayMs: 60_000,
+          errorName: 'APIProviderQuotaExhaustedError',
+        }),
       }),
     ]);
   });

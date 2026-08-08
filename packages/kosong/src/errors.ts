@@ -124,8 +124,12 @@ export class APIProviderRateLimitError extends APIStatusError {
  * exhausted, as opposed to a transient rate limit. Deliberately NOT a
  * subclass of `APIProviderRateLimitError`: a rate limit clears on its own
  * (retry/requeue helps), while quota exhaustion is deterministic until the
- * account is recharged — so this class is excluded from retry and from the
- * rate-limit requeue/suspend paths.
+ * account is recharged — so this class is excluded from the generic
+ * `isRetryableGenerateError` classification and from the rate-limit
+ * requeue/suspend paths. Hosts may still choose to retry it: the
+ * agent-core-v2 `stepRetry` plugin claims every 429 (quota included) and
+ * retries indefinitely, because token-plan providers refill quota on a
+ * schedule and their "quota exhausted" 429 is actually transient.
  *
  * Observed shapes: Moonshot returns `error.type =
  * "exceeded_current_quota_error"` with wording that varies by account state
@@ -219,8 +223,9 @@ export function isRetryableGenerateError(error: unknown): boolean {
   }
   if (error instanceof APIStatusError) {
     // Quota/balance exhaustion is a 429 but deterministic until the account
-    // is recharged — retrying can never succeed, so it fails fast instead of
-    // burning the whole retry budget (~2-3 minutes of backoff).
+    // is recharged, so the generic classification fails it fast instead of
+    // burning the whole retry budget — hosts that want indefinite 429 retries
+    // (like agent-core-v2's stepRetry) claim it separately by status code.
     if (error instanceof APIProviderQuotaExhaustedError) {
       return false;
     }
